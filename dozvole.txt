@@ -1,0 +1,27 @@
+# SIMKE TRADE: POPIS DOZVOLA
+# Ovo je tvoj daljinski upravljač. Mijenjaš samo riječi DA i NE.
+# Svaki redak koji počinje znakom # je uputa. Aplikacija takve retke preskače.
+
+
+# GLAVNI PREKIDAČ (za sve odjednom)
+# DA = aplikacija radi.   NE = isključena je svima.
+
+SVI = DA
+
+
+# PORUKA koju čovjek vidi kad mu je aplikacija isključena. Smiješ je promijeniti.
+
+PORUKA = Aplikacija je isključena. Javi se osobi od koje si dobio poveznicu.
+
+
+# LJUDI (svaka osoba ima svoj redak i svoju šifru)
+# Isključiti osobu: u njezinom retku promijeni DA u NE.
+# Dodati osobu: dopiši novi redak. Šifru izmisliš sam: ime i par brojki, bez razmaka, npr.  ANA-3355 = DA
+# Poveznica za osobu je adresa aplikacije, a na kraju  ?sifra=  i njezina šifra:
+#   ti:     https://gordo72.github.io/simke-trade/?sifra=JA-7306
+#   Marko:  https://gordo72.github.io/simke-trade/?sifra=MARKO-6437
+# Ne upisuj prezimena ni brojeve telefona: ovaj popis može pročitati svatko tko zna njegovu adresu.
+# Ako ti ne treba po osobi, obriši sve retke ispod. Tada svi koriste istu poveznicu i vrijedi samo glavni prekidač.
+
+JA-7306 = DA
+MARKO-6437 = DA

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="hr" data-build="otvoreno">
+<html lang="hr" data-build="zasticeno">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -670,7 +670,26 @@ html[data-build="zasticeno"]:not(.unlocked) .app, html[data-build="zasticeno"]:n
   </div>
 </dialog>
 
-
+<div class="gate" id="gate" role="dialog" aria-modal="true" aria-labelledby="gateTitle" hidden>
+  <div class="gate-card">
+    <div class="gate-brand">
+      <svg class="gate-mark" aria-hidden="true"><use href="#i-compass"/></svg>
+      <span class="wordmark">Simke Trade<span class="tm">™</span></span>
+    </div>
+    <h1 id="gateTitle" tabindex="-1"></h1>
+    <p class="gate-text" id="gateText"></p>
+    <form class="gate-form" id="gateForm" novalidate hidden>
+      <label for="gateCode">Šifra</label>
+      <input id="gateCode" type="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go" aria-describedby="gateErr">
+      <p class="gate-err" id="gateErr" role="alert" hidden></p>
+      <button class="btn brass" type="submit">Otključaj</button>
+    </form>
+    <div class="gate-actions" id="gateActions" hidden>
+      <button class="btn brass" id="gateRetry" type="button">Provjeri ponovno</button>
+      <button class="btn ghost" id="gateOther" type="button">Upiši drugu šifru</button>
+    </div>
+  </div>
+</div>
 <div class="busy" id="busy" hidden><div class="busy-box"><svg class="busy-mark" aria-hidden="true"><use href="#i-compass"/></svg><span id="busyText">Slažem rutu</span></div></div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
@@ -3499,7 +3518,188 @@ function init() {
 }
 
 
-var Gate = null;   // obična kopija nema bravu
+/* Simke Trade: daljinski prekidač. Ulazi samo u zaštićenu kopiju (dist/zasticeno/index.html).
+   Aplikacija pri svakom otvaranju, i dok je otvorena svakih nekoliko minuta, pročita dozvole.txt koji stoji pokraj nje.
+   Vlasnik u toj datoteci mijenja DA u NE. Ovo je brava za poštene korisnike: tko zna programirati,
+   može je izvaditi iz spremljene kopije, a popis dozvola je javno čitljiv svakome tko zna njegovu adresu. */
+
+var Gate = (function () {
+  var KEY = 'markopolo.v1.dozvola';
+  var cfg = { file: 'dozvole.txt', grace: 72 * 3600e3, every: 5 * 60e3, timeout: 10000 };
+  var G = { locked: true, state: '', code: '', codes: [''], started: false, cb: null, permits: null, lastTry: 0, seq: 0, cfg: cfg };
+
+  var TEXT = {
+    checking: ['Provjeravam dozvolu', 'Samo trenutak.'],
+    need: ['Upiši šifru', 'Šifra je dio poveznice koju si dobio: ono što piše iza „sifra=“. Ako je nemaš, javi se osobi koja ti je poslala aplikaciju.'],
+    off: ['Pristup je isključen', 'Tvoj pristup aplikaciji Simke Trade je isključen. Javi se osobi od koje si dobio poveznicu.'],
+    'off-all': ['Aplikacija je isključena', 'Aplikacija trenutačno nije dostupna. Javi se osobi od koje si dobio poveznicu.'],
+    offline: ['Ne mogu provjeriti dozvolu', 'Za provjeru treba internetska veza. Spoji se pa pokušaj ponovno.'],
+    bad: ['Popis dozvola nije dostupan', 'Uz aplikaciju mora stajati datoteka dozvole.txt. Javi se osobi od koje si dobio poveznicu.'],
+    local: ['Ova kopija radi samo preko poveznice', 'Otvori poveznicu koju si dobio. Ako ti postavljaš aplikaciju: ova datoteka ide na web zajedno s datotekom dozvole.txt i tek tamo radi.']
+  };
+
+  function stored() { var v = lsGet(KEY); return v && typeof v === 'object' ? v : {}; }
+  function remember(ok) { lsSet(KEY, { code: G.code, okAt: ok ? Date.now() : 0 }); }
+
+  function same(a, b) { return C.codeKey(a) === C.codeKey(b); }
+
+  /* Poček: uređaj koji je nedavno dobio DA smije raditi i kad se popis trenutačno ne može pročitati (tunel, slab signal).
+     Vrijedi samo za šifru koja je na ovom uređaju dobila DA. Vraća tu šifru, ili null ako počeka nema. */
+  function graceCode() {
+    var s = stored(), age = Date.now() - (s.okAt || 0);
+    if (!s.okAt || age < -60000 || age >= cfg.grace) return null;
+    for (var i = 0; i < G.codes.length; i++) if (same(G.codes[i], s.code)) return G.codes[i];
+    return null;
+  }
+
+  function urlCode() {
+    var m = /[?&#]sifra=([^&#]*)/i.exec(location.search + location.hash);
+    if (!m) return '';
+    try { return decodeURIComponent(m[1].replace(/\+/g, ' ')).trim(); } catch (e) { return m[1].trim(); }
+  }
+
+  /* Šifra ostaje u adresi (?sifra=...), pa je nosi i ikona koju čovjek doda na početni zaslon mobitela. */
+  function stampUrl() {
+    if (!G.permits || !G.permits.count || !G.code) return;
+    try {
+      var q = new URLSearchParams(location.search), hash = /^#sifra=/i.test(location.hash) ? '' : location.hash;
+      if (q.get('sifra') === G.code && hash === location.hash) return;
+      q.set('sifra', G.code);
+      history.replaceState(null, '', location.pathname + '?' + q.toString() + hash);
+    } catch (e) { /* adresa ostaje kakva jest */ }
+  }
+
+  function fileUrls() {
+    var base = location.href.split(/[?#]/)[0], out = [new URL(cfg.file, base).href];
+    var last = base.slice(base.lastIndexOf('/') + 1);
+    if (last && last.indexOf('.') < 0) out.push(base + '/' + cfg.file);   // adresa mape upisana bez završne kose crte
+    return out;
+  }
+
+  /* 'list' = popis je pročitan, 'missing' = poslužitelj kaže da ga nema, 'fail' = nema veze ili poslužitelj ne odgovara. */
+  function get(url) {
+    var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, cfg.timeout);
+    var late = new Promise(function (res) { setTimeout(function () { res({ kind: 'fail' }); }, cfg.timeout + 400); });
+    var req = fetch(url + (url.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now(), { cache: 'no-store', credentials: 'omit', signal: ctl ? ctl.signal : undefined })
+      .then(function (r) {
+        if (r.ok) return r.text().then(function (t) { return { kind: 'list', p: C.parsePermits(t) }; });
+        return { kind: r.status === 404 || r.status === 410 ? 'missing' : 'fail' };
+      });
+    return Promise.race([req, late]).then(function (x) { clearTimeout(timer); return x; }, function () { clearTimeout(timer); return { kind: 'fail' }; });
+  }
+
+  function load() {
+    var list = fileUrls();
+    return get(list[0]).then(function (r) { return r.kind === 'missing' && list[1] ? get(list[1]) : r; });
+  }
+
+  function decide(r) {
+    if (r.kind === 'list') {
+      /* Pri otvaranju mogu postojati dvije šifre: ona iz adrese i ona upamćena na uređaju (stara ikona na početnom zaslonu,
+         a čovjek je u međuvremenu dobio novu šifru). Vrijedi prva koja ima DA. Čim jedna prođe, druga se zaboravlja. */
+      var code = G.codes[0], st = C.permitFor(r.p, code);
+      for (var i = 1; i < G.codes.length && st !== 'ok'; i++) if (C.permitFor(r.p, G.codes[i]) === 'ok') { code = G.codes[i]; st = 'ok'; }
+      G.permits = r.p; G.code = code;
+      if (st === 'ok') G.codes = [code];
+      remember(st === 'ok');
+      return st === 'ok' ? open() : lock(st);
+    }
+    if (r.kind === 'missing') { remember(false); return lock('bad'); }
+    var gc = graceCode();
+    if (gc !== null) { G.code = gc; return open(); }
+    lock('offline');
+  }
+
+  /* Vrijedi samo odgovor na zadnji upit: ako čovjek u međuvremenu upiše drugu šifru, stariji odgovor se odbacuje. */
+  function check() {
+    if (G.state === 'local') return Promise.resolve();
+    var n = ++G.seq;
+    G.lastTry = Date.now();
+    return load().then(function (r) { if (n === G.seq) decide(r); });
+  }
+
+  function quiet() {
+    try { closeSheet(); hideDialog($('confirm')); Voice.stop(); unbusy(); $('toast').hidden = true; } catch (e) { /* ništa od toga nije nužno */ }
+  }
+
+  function setErr(msg) { var e = $('gateErr'); e.textContent = msg || ''; e.hidden = !msg; }
+
+  function paint(focus) {
+    var st = G.state, form = st === 'need' || st === 'unknown', t = TEXT[form ? 'need' : st], g = $('gate');
+    var msg = (st === 'off' || st === 'off-all') && G.permits && G.permits.msg;
+    g.className = 'gate ' + st;
+    $('gateTitle').textContent = t[0];
+    $('gateText').textContent = msg || t[1];
+    $('gateForm').hidden = !form;
+    if (form) {
+      $('gateCode').value = st === 'unknown' ? G.code : '';
+      setErr(st === 'unknown' ? 'Te šifre nema na popisu. Provjeri je pa upiši ponovno.' : '');
+    }
+    $('gateActions').hidden = !(st === 'off' || st === 'off-all' || st === 'offline' || st === 'bad');
+    $('gateRetry').textContent = st === 'offline' ? 'Pokušaj ponovno' : 'Provjeri ponovno';
+    $('gateOther').hidden = st !== 'off';
+    g.hidden = false;
+    if (focus) { try { (form ? $('gateCode') : $('gateTitle')).focus({ preventScroll: true }); } catch (e) { /* stariji preglednici */ } }
+  }
+
+  function lock(state) {
+    var changed = !G.locked || G.state !== state;
+    G.locked = true; G.state = state;
+    document.documentElement.classList.remove('unlocked');
+    var app = $('app');
+    app.inert = true; app.setAttribute('aria-hidden', 'true');
+    if (G.started) quiet();
+    paint(changed);
+  }
+
+  function open() {
+    G.locked = false; G.state = 'ok';
+    $('gate').hidden = true;
+    document.documentElement.classList.add('unlocked');
+    var app = $('app');
+    app.inert = false; app.removeAttribute('aria-hidden');
+    stampUrl();
+    if (!G.started) { G.started = true; G.cb(); }
+  }
+
+  /* Dok čovjek upisuje šifru, pozadinska provjera mu ne smije obrisati upisano. */
+  function auto() { return !(G.locked && (G.state === 'need' || G.state === 'unknown' || G.state === 'checking' || G.state === 'local')); }
+  function tick(minAge) { if (auto() && document.visibilityState !== 'hidden' && Date.now() - G.lastTry >= minAge) check(); }
+
+  function wire() {
+    $('gateForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = $('gateCode').value.trim();
+      if (!C.codeKey(v)) { setErr('Upiši šifru.'); $('gateCode').focus(); return; }
+      G.code = v; G.codes = [v];
+      lock('checking'); check();
+    });
+    $('gateCode').addEventListener('input', function () { setErr(''); });
+    $('gateRetry').addEventListener('click', function () { lock('checking'); check(); });
+    $('gateOther').addEventListener('click', function () { G.state = 'need'; paint(true); });
+    setInterval(function () { tick(cfg.every); }, 30000);
+    document.addEventListener('visibilitychange', function () { tick(60000); });
+    window.addEventListener('online', function () { tick(0); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) tick(0); });
+  }
+
+  G.boot = function (cb) {
+    G.cb = cb;
+    wire();
+    if (!/^https?:$/.test(location.protocol)) return lock('local');
+    G.codes = [urlCode(), stored().code || ''].filter(function (c, i, a) { return C.codeKey(c) && a.findIndex(function (x) { return same(x, c); }) === i; });
+    if (!G.codes.length) G.codes = [''];
+    G.code = G.codes[0];
+    var first = check(), gc = graceCode();
+    if (gc !== null) { G.code = gc; open(); } else lock('checking');
+    return first;
+  };
+  G.check = check;
+  G.tick = tick;
+  G.info = function () { return G.permits && G.permits.count && G.code ? G.code : ''; };
+  return G;
+})();
 
 function boot() { if (Gate) Gate.boot(init); else init(); }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

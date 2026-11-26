@@ -3520,13 +3520,16 @@ function init() {
 
 /* Simke Trade: daljinski prekidač. Ulazi samo u zaštićenu kopiju (dist/zasticeno/index.html).
    Aplikacija pri svakom otvaranju, i dok je otvorena svakih nekoliko minuta, pročita dozvole.txt koji stoji pokraj nje.
-   Vlasnik u toj datoteci mijenja DA u NE. Ovo je brava za poštene korisnike: tko zna programirati,
-   može je izvaditi iz spremljene kopije, a popis dozvola je javno čitljiv svakome tko zna njegovu adresu. */
+   Vlasnik u toj datoteci mijenja DA u NE. Zaključava samo popis: NE uz šifru, SVI = NE, ili šifra koje na popisu nema.
+   Ako se popis ne može pročitati (nema interneta, poslužitelj ne odgovara, datoteka nedostaje ili je pokvarena),
+   ništa se ne mijenja: uređaj ostaje otključan ili zaključan kako je bio zadnji put kad je popis pročitan.
+   Ovo je brava za poštene korisnike: tko zna programirati, može je izvaditi iz spremljene kopije,
+   a popis dozvola je javno čitljiv svakome tko zna njegovu adresu. */
 
 var Gate = (function () {
   var KEY = 'markopolo.v1.dozvola';
-  var cfg = { file: 'dozvole.txt', grace: 72 * 3600e3, every: 5 * 60e3, timeout: 10000 };
-  var G = { locked: true, state: '', code: '', codes: [''], started: false, cb: null, permits: null, lastTry: 0, seq: 0, cfg: cfg };
+  var cfg = { file: 'dozvole.txt', every: 5 * 60e3, timeout: 10000 };
+  var G = { locked: true, state: '', code: '', codes: [''], started: false, cb: null, permits: null, saved: null, lastTry: 0, seq: 0, cfg: cfg };
 
   var TEXT = {
     checking: ['Provjeravam dozvolu', 'Samo trenutak.'],
@@ -3539,17 +3542,31 @@ var Gate = (function () {
   };
 
   function stored() { var v = lsGet(KEY); return v && typeof v === 'object' ? v : {}; }
-  function remember(ok) { lsSet(KEY, { code: G.code, okAt: ok ? Date.now() : 0 }); }
+
+  /* Zadnja odluka s popisa na ovom uređaju: { code, st: 'ok' | 'off' | 'off-all' | 'unknown' | 'need', msg }.
+     Zapis prve inačice ({ code, okAt }) vrijedi kao DA ako je okAt postavljen. Starost zapisa nije važna. */
+  function last() {
+    var s = stored();
+    return typeof s.st === 'string' ? s : { code: s.code, st: s.okAt > 0 ? 'ok' : '' };
+  }
+  function remember(st) { lsSet(KEY, { code: G.code, st: st, at: Date.now(), msg: (G.permits && G.permits.msg) || '' }); }
 
   function same(a, b) { return C.codeKey(a) === C.codeKey(b); }
 
-  /* Poček: uređaj koji je nedavno dobio DA smije raditi i kad se popis trenutačno ne može pročitati (tunel, slab signal).
-     Vrijedi samo za šifru koja je na ovom uređaju dobila DA. Vraća tu šifru, ili null ako počeka nema. */
-  function graceCode() {
-    var s = stored(), age = Date.now() - (s.okAt || 0);
-    if (!s.okAt || age < -60000 || age >= cfg.grace) return null;
+  /* Šifra uz koju je zapisana zadnja odluka, ako je i sada u igri (iz adrese ili upamćena). Inače null. */
+  function lastCode(s) {
+    if (typeof s.code !== 'string') return null;
     for (var i = 0; i < G.codes.length; i++) if (same(G.codes[i], s.code)) return G.codes[i];
     return null;
+  }
+
+  /* Popis se ne može pročitati: ništa se ne mijenja. Uređaj radi, ili je isključen, kako je bio zadnji put kad je popis
+     pročitan, koliko god od toga prošlo. Samo uređaj koji s ovom šifrom popis još nikad nije pročitao čeka da ga pročita. */
+  function keep(kind) {
+    var s = last(), c = lastCode(s);
+    if (c !== null && s.st === 'ok') { G.code = c; return open(); }
+    if (c !== null && (s.st === 'off' || s.st === 'off-all')) { G.code = c; G.saved = s; return lock(s.st); }
+    lock(kind === 'fail' ? 'offline' : 'bad');
   }
 
   function urlCode() {
@@ -3595,20 +3612,17 @@ var Gate = (function () {
   }
 
   function decide(r) {
-    if (r.kind === 'list') {
+    if (r.kind === 'list' && !r.p.bad) {
       /* Pri otvaranju mogu postojati dvije šifre: ona iz adrese i ona upamćena na uređaju (stara ikona na početnom zaslonu,
          a čovjek je u međuvremenu dobio novu šifru). Vrijedi prva koja ima DA. Čim jedna prođe, druga se zaboravlja. */
       var code = G.codes[0], st = C.permitFor(r.p, code);
       for (var i = 1; i < G.codes.length && st !== 'ok'; i++) if (C.permitFor(r.p, G.codes[i]) === 'ok') { code = G.codes[i]; st = 'ok'; }
       G.permits = r.p; G.code = code;
       if (st === 'ok') G.codes = [code];
-      remember(st === 'ok');
+      remember(st);
       return st === 'ok' ? open() : lock(st);
     }
-    if (r.kind === 'missing') { remember(false); return lock('bad'); }
-    var gc = graceCode();
-    if (gc !== null) { G.code = gc; return open(); }
-    lock('offline');
+    keep(r.kind === 'fail' ? 'fail' : 'bad');
   }
 
   /* Vrijedi samo odgovor na zadnji upit: ako čovjek u međuvremenu upiše drugu šifru, stariji odgovor se odbacuje. */
@@ -3627,7 +3641,7 @@ var Gate = (function () {
 
   function paint(focus) {
     var st = G.state, form = st === 'need' || st === 'unknown', t = TEXT[form ? 'need' : st], g = $('gate');
-    var msg = (st === 'off' || st === 'off-all') && G.permits && G.permits.msg;
+    var msg = (st === 'off' || st === 'off-all') && (G.permits ? G.permits.msg : G.saved && G.saved.msg);
     g.className = 'gate ' + st;
     $('gateTitle').textContent = t[0];
     $('gateText').textContent = msg || t[1];
@@ -3691,8 +3705,8 @@ var Gate = (function () {
     G.codes = [urlCode(), stored().code || ''].filter(function (c, i, a) { return C.codeKey(c) && a.findIndex(function (x) { return same(x, c); }) === i; });
     if (!G.codes.length) G.codes = [''];
     G.code = G.codes[0];
-    var first = check(), gc = graceCode();
-    if (gc !== null) { G.code = gc; open(); } else lock('checking');
+    var first = check(), s = last(), c = lastCode(s);
+    if (c !== null && s.st === 'ok') { G.code = c; open(); } else lock('checking');
     return first;
   };
   G.check = check;
